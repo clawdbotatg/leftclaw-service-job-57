@@ -27,3 +27,6 @@ dist
 packages/foundry/.env
 packages/nextjs/.env.local
 ipfs-upload.config.json
+
+# logs
+logs/
