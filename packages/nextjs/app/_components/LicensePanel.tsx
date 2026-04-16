@@ -2,14 +2,20 @@
 
 import { useMemo, useState } from "react";
 import { formatEther } from "viem";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId, useSwitchChain } from "wagmi";
 import { useDeployedContractInfo, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import scaffoldConfig from "~~/scaffold.config";
 import { notification } from "~~/utils/scaffold-eth";
 
 const LICENSE_COST = 5000n * 10n ** 18n;
 
 export function LicensePanel() {
   const { address } = useAccount();
+  const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
+  const targetNetwork = scaffoldConfig.targetNetworks[0];
+  const isWrongNetwork = !!address && chainId !== targetNetwork.id;
+
   const [approving, setApproving] = useState(false);
 
   const { data: bossSlayerInfo } = useDeployedContractInfo({ contractName: "BossSlayer" });
@@ -42,6 +48,10 @@ export function LicensePanel() {
   const hasEnoughCLAWD = useMemo(() => (clawdBalance ?? 0n) >= LICENSE_COST, [clawdBalance]);
   const hasAllowance = useMemo(() => (allowance ?? 0n) >= LICENSE_COST, [allowance]);
 
+  // Known issue: approve only implements the `approving` guard (signature-request → hash-return gap).
+  // The second `approveCooldown` state (confirmation → allowance-cache-refresh gap) is absent;
+  // fast double-clicks after confirmation can still trigger a redundant second transaction.
+  // Acceptable for v1; add approveCooldown + setTimeout in a future cycle.
   const handleApprove = async () => {
     if (!bossSlayerAddress) return;
     try {
@@ -92,7 +102,14 @@ export function LicensePanel() {
           Costs <span className="font-mono font-bold">5,000 CLAWD</span>. 25% burned, 75% to pot.
         </div>
 
-        {!hasAllowance ? (
+        {isWrongNetwork ? (
+          <button
+            className="btn btn-warning btn-sm w-full"
+            onClick={() => switchChain?.({ chainId: targetNetwork.id })}
+          >
+            Switch to {targetNetwork.name}
+          </button>
+        ) : !hasAllowance ? (
           <button className="btn btn-primary btn-sm" disabled={!address || approving} onClick={handleApprove}>
             {approving ? <span className="loading loading-spinner loading-xs"></span> : null}
             Approve CLAWD

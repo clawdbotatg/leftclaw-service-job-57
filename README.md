@@ -106,3 +106,11 @@ The following issues were identified in the security audit and are accepted for 
 - **[INFO] Minimal CLAWD ABI in externalContracts.ts** — Only `balanceOf`, `allowance`, `approve`, `transfer`, and a few other standard ERC-20 functions are included. Sufficient for the current UI; add more selectors if future features need them.
 
 - **[INFO] No Phantom wallet connector** — Stock RainbowKit connectors are used. Phantom holders on Base may need to use the generic injected connector. Add an explicit Phantom connector in a future cycle if desired.
+
+- **[LOW] LicensePanel approve missing approveCooldown state** — `LicensePanel.tsx` — The approve button implements the `approving` guard (covers signature-request → tx-hash gap) but lacks a second `approveCooldown` state to cover the confirmation → allowance-cache-refresh gap. Fast double-clicks after confirmation can still trigger a redundant second transaction. Add `approveCooldown` + `setTimeout` in a future cycle.
+
+- **[INFO] Hardcoded fallback API keys in public repo** — `scaffold.config.ts` — `DEFAULT_ALCHEMY_API_KEY` and `walletConnectProjectId` are the SE-2 shared defaults tracked in the public repo. Set `NEXT_PUBLIC_ALCHEMY_API_KEY`, `NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID`, and `ALCHEMY_API_KEY` in Vercel/CI env config before going live; shared defaults will rate-limit under real traffic.
+
+- **[INFO] PastRaids scans from block 0** — `PastRaids.tsx` — Event history is fetched with `fromBlock: 0n`. Works for a freshly deployed contract but will slow as the chain grows. Anchor `fromBlock` to the deploy block in a future iteration.
+
+- **[INFO] Missing test for zero-initialOwner constructor guard** — `BossSlayer.t.sol` — `test_constructor_rejectsZeroClawd` is present but there is no corresponding test for the `require(initialOwner != address(0), "owner=0")` guard. The guard in the contract is correct; this is a test-coverage gap only.

@@ -11,6 +11,9 @@ export type BaseConfig = {
 
 export type ScaffoldConfig = BaseConfig;
 
+// Known issue: DEFAULT_ALCHEMY_API_KEY and walletConnectProjectId below are SE-2 shared defaults
+// tracked in the public repo. Set NEXT_PUBLIC_ALCHEMY_API_KEY, NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID,
+// and ALCHEMY_API_KEY in Vercel/CI env config before going live; shared defaults rate-limit under real traffic.
 export const DEFAULT_ALCHEMY_API_KEY = "cR4WnXePioePZ5fFrnSiR";
 
 const scaffoldConfig = {

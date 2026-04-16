@@ -1,14 +1,26 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { formatEther } from "viem";
-import { useAccount, useBlockNumber } from "wagmi";
+import { useAccount, useBlockNumber, useChainId, useSwitchChain } from "wagmi";
 import { useDeployedContractInfo, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
+import scaffoldConfig from "~~/scaffold.config";
 
 const ATTACK_COST = 200n * 10n ** 18n;
 
 export function AttackPanel() {
   const { address } = useAccount();
+  const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
+  const targetNetwork = scaffoldConfig.targetNetworks[0];
+  const isWrongNetwork = !!address && chainId !== targetNetwork.id;
+
+  // Approve double-submission protection states.
+  // approvalSubmitting: covers signature-request → tx-hash-return gap.
+  // approveCooldown: covers tx-confirmation → allowance-cache-refresh gap.
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [approveCooldown, setApproveCooldown] = useState(false);
+
   const { data: bossSlayerInfo } = useDeployedContractInfo({ contractName: "BossSlayer" });
   const bossSlayerAddress = bossSlayerInfo?.address;
 
@@ -68,7 +80,9 @@ export function AttackPanel() {
   const isExpired = hasPending && currentBlock > pendingCommitBlock + 255n;
 
   const { writeContractAsync, isMining } = useScaffoldWriteContract({ contractName: "BossSlayer" });
-  const { writeContractAsync: approveClawd } = useScaffoldWriteContract({ contractName: "Clawd" });
+  const { writeContractAsync: approveClawd, isMining: approveIsMining } = useScaffoldWriteContract({
+    contractName: "Clawd",
+  });
 
   const hasLicense = (licenseBalance ?? 0n) > 0n;
   const hasAllowance = (allowance ?? 0n) >= ATTACK_COST;
@@ -103,16 +117,30 @@ export function AttackPanel() {
   const handleApprove = async () => {
     if (!bossSlayerAddress) return;
     try {
+      setApprovalSubmitting(true);
       await approveClawd({
         functionName: "approve",
         args: [bossSlayerAddress, 2n ** 256n - 1n],
       });
+      setApprovalSubmitting(false);
+      setApproveCooldown(true);
+      setTimeout(() => setApproveCooldown(false), 1500);
     } catch (e) {
       console.error(e);
+      setApprovalSubmitting(false);
     }
   };
 
-  const commitDisabled = !address || !raidActive || !hasLicense || isMining || hasPending;
+  const approveDisabled = approvalSubmitting || approveCooldown || approveIsMining;
+  const commitDisabled =
+    !address ||
+    !raidActive ||
+    !hasLicense ||
+    isMining ||
+    hasPending ||
+    approveIsMining ||
+    approvalSubmitting ||
+    approveCooldown;
   const revealDisabled = !address || isMining || !canReveal || isExpired;
 
   const commitReason = !address
@@ -178,30 +206,42 @@ export function AttackPanel() {
           </div>
         )}
 
-        {!hasPending && (hasAllowance || !address) ? (
+        {isWrongNetwork ? (
           <button
-            className={`btn ${raidActive && !commitDisabled ? "btn-error" : "btn-disabled"} btn-lg`}
-            disabled={commitDisabled}
-            onClick={handleCommit}
+            className="btn btn-warning btn-lg w-full"
+            onClick={() => switchChain?.({ chainId: targetNetwork.id })}
           >
-            {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">🗡️</span>}
-            {commitReason || "COMMIT ATTACK"}
+            Switch to {targetNetwork.name}
           </button>
-        ) : !hasPending ? (
-          <button className="btn btn-primary btn-sm" onClick={handleApprove}>
-            Approve CLAWD to Attack
-          </button>
-        ) : null}
+        ) : (
+          <>
+            {!hasPending && (hasAllowance || !address) ? (
+              <button
+                className={`btn ${raidActive && !commitDisabled ? "btn-error" : "btn-disabled"} btn-lg`}
+                disabled={commitDisabled}
+                onClick={handleCommit}
+              >
+                {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">🗡️</span>}
+                {commitReason || "COMMIT ATTACK"}
+              </button>
+            ) : !hasPending ? (
+              <button className="btn btn-primary btn-sm" disabled={approveDisabled} onClick={handleApprove}>
+                {approveDisabled ? <span className="loading loading-spinner loading-xs"></span> : null}
+                Approve CLAWD to Attack
+              </button>
+            ) : null}
 
-        {hasPending && (
-          <button
-            className={`btn ${canReveal && !revealDisabled ? "btn-success" : "btn-disabled"} btn-lg`}
-            disabled={revealDisabled}
-            onClick={handleReveal}
-          >
-            {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">✨</span>}
-            {isExpired ? "CLEAR EXPIRED ATTACK" : canReveal ? "REVEAL ATTACK" : "Waiting for next block…"}
-          </button>
+            {hasPending && (
+              <button
+                className={`btn ${canReveal && !revealDisabled ? "btn-success" : "btn-disabled"} btn-lg`}
+                disabled={revealDisabled}
+                onClick={handleReveal}
+              >
+                {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">✨</span>}
+                {isExpired ? "CLEAR EXPIRED ATTACK" : canReveal ? "REVEAL ATTACK" : "Waiting for next block…"}
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>

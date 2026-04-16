@@ -5,6 +5,8 @@ import { formatEther } from "viem";
 import { useScaffoldEventHistory } from "~~/hooks/scaffold-eth";
 
 export function PastRaids() {
+  // Known issue: fromBlock: 0n scans from genesis. Works for a freshly deployed contract but will slow
+  // as the chain grows. Anchor fromBlock to the deploy block in a future iteration.
   const { data: completeEvents, isLoading } = useScaffoldEventHistory({
     contractName: "BossSlayer",
     eventName: "RaidComplete",

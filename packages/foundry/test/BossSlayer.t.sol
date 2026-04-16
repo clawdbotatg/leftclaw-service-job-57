@@ -57,6 +57,9 @@ contract BossSlayerTest is Test {
         new BossSlayer(address(0), owner);
     }
 
+    // Known issue: no corresponding test for the `require(initialOwner != address(0), "owner=0")`
+    // constructor guard. The guard in the contract is correct; this is a coverage gap only.
+
     // --- License ---
     function test_mintLicense_burnsAndAddsToPot() public {
         vm.prank(alice);
