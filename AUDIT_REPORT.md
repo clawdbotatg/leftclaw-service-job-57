@@ -1,33 +1,50 @@
-# Audit Report — Cycle 2
+# Audit Report — Cycle 3
 
 ## MUST FIX
 
-- [x] **[HIGH]** AttackPanel approve button has no double-submission protection — `packages/nextjs/app/_components/AttackPanel.tsx:191` — The "Approve CLAWD to Attack" button has no `disabled` prop, no `approvalSubmitting` state, and no loading spinner. Per the QA audit framework, approve button protection is a critical ship-blocking requirement covering two windows: `approvalSubmitting` (signature request → hash return) and `approveCooldown` (confirmation → allowance cache refresh). A user who double-clicks fires multiple wallet approval prompts. Fix: add both states (feeding into `disabled`), a loading spinner, and destructure `isMining` from the `approveClawd` write hook so the commit button also knows an approval is in flight.
-
-- [x] **[HIGH]** Switch Network state not replacing the CTA button — `packages/nextjs/app/_components/AttackPanel.tsx`, `packages/nextjs/app/_components/LicensePanel.tsx` — Per the QA audit framework ("critical ship-blocking"), "the Switch Network state must replace the primary CTA button itself, not merely appear in a header dropdown." When connected to a non-Base chain the action buttons are disabled with misleading copy ("Raid not active") instead of a visible "Switch to Base" button replacing them in-place. Fix: check connected `chain.id` against the target network in each panel and render a Switch Network CTA in place of the action button when on the wrong chain.
+- [ ] **[CRITICAL]** BossSlayer address is zero placeholder on Base — `packages/nextjs/contracts/deployedContracts.ts:613` — The `address` field for `BossSlayer` on chain 8453 is `0x0000000000000000000000000000000000000000`. Every frontend transaction will route to the zero address and revert silently; users cannot interact with the contract at all. The file comment notes this is overwritten by the deploy worker after `yarn deploy --network base`. Confirm the actual deployment has completed and this field contains the live contract address before going live; do not ship the frontend with the placeholder.
 
 ## KNOWN ISSUES
 
-- **[LOW]** `renounceOwnership()` permanently locks admin functions — `packages/foundry/contracts/BossSlayer.sol:7-8` — Inheriting OZ `Ownable` exposes `renounceOwnership()`. If the client calls it, `startRaid()` and `injectBounty()` become permanently inaccessible. No user funds are at risk (an active raid still settles on kill). Acknowledged in contract NatDoc comment. Accepted operational risk.
+- **[LOW]** `renounceOwnership()` permanently locks admin functions — `BossSlayer.sol:8` — Inheriting OZ `Ownable` exposes `renounceOwnership()`. If the client calls it, `startRaid()` and `injectBounty()` become permanently inaccessible. No user funds are at risk (an active raid still settles on kill). Acknowledged in contract NatDoc comment. Accepted operational risk.
 
-- **[LOW]** Lucky Drop RNG finisher-bias — `packages/foundry/contracts/BossSlayer.sol:297-327` — `_payLucky` seeds its selection from `blockhash(block.number - 1)` at kill time. The finisher can compute the lucky-winner set before landing the killing blow and choose whether to proceed. Impact is capped at 5% of pot. Acknowledged in contract NatDoc comment. Acceptable for v1; fix would bundle the lucky seed into the same commit-reveal extension used for crits.
+- **[LOW]** Lucky Drop RNG is finisher-influenceable — `BossSlayer.sol:303` — `_payLucky` seeds its selection from `blockhash(block.number - 1)` at kill time. The finisher can compute the 5-winner set before choosing to land the killing blow. Impact is capped at 5% of pot. Acknowledged in code comment; acceptable for v1.
 
-- **[LOW]** Settlement gas scales with unique-attacker count — `packages/foundry/contracts/BossSlayer.sol:241-257` — `_settle()` runs three full-length loops over all unique attackers (reload, heavy, lucky); `startRaid()` clears the prior array. The finisher pays settlement gas. At extreme attacker counts this could approach Base's block gas limit (~30M). Acknowledged in contract NatDoc comment. Acceptable at current game scale; a future cycle could move to a pull-based claim model.
+- **[LOW]** Settlement and `startRaid` run O(n) loops over unique attackers — `BossSlayer.sol:215-231, 260-327` — Three settlement loops plus one state-clear loop all iterate the full `attackers` array; the finisher pays that gas. Acceptable on Base at current game scale. Acknowledged in code comments.
 
-- **[LOW]** ERC-1155 Slayer License has no metadata URI — `packages/foundry/contracts/BossSlayer.sol:103-106` — `uri()` returns an empty string. Wallets and marketplaces show blank NFTs. Licenses are utility-only; the UI derives balance from contract state. Acknowledged in contract NatDoc comment. A URI setter can be added in a future cycle.
+- **[INFO]** Slayer License has no metadata URI — `BossSlayer.sol:103-106` — `uri()` returns an empty string; wallets and marketplaces show a blank NFT. Licenses are utility-only; the UI reads balance directly from contract state. Acknowledged in contract NatDoc comment. A URI setter can be added in a future cycle.
 
-- **[LOW]** `LicensePanel` approve missing `approveCooldown` state — `packages/nextjs/app/_components/LicensePanel.tsx:45-57` — `LicensePanel` implements the `approving` state (covers signature-request → hash-return gap) but lacks a second `approveCooldown` state to cover the confirmation → allowance-cache-refresh gap. The QA skill requires both. Lower severity than the `AttackPanel` finding above since one guard is already in place; fast double-clicks after confirmation can still trigger a redundant second transaction.
+- **[INFO]** `NoAttackersToStart` error is defined but never used — `BossSlayer.sol:85` — The custom error is declared but no code path reverts with it. Dead code; no functional impact.
 
-- **[INFO]** Hardcoded fallback API keys committed in public files — `packages/nextjs/scaffold.config.ts`, `packages/foundry/.env.example` — `DEFAULT_ALCHEMY_API_KEY` and `walletConnectProjectId` in `scaffold.config.ts`, and the values of `ALCHEMY_API_KEY` and `ETHERSCAN_API_KEY` in `packages/foundry/.env.example`, are the SE-2 shared defaults and are tracked in the public repo. These are well-known shared keys, not project-specific secrets. However, the team must set their own `NEXT_PUBLIC_ALCHEMY_API_KEY`, `NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID`, and `ALCHEMY_API_KEY` in Vercel/CI env config before going live; the shared defaults will rate-limit under real traffic.
+- **[INFO]** `damageDealt` credits full overkill damage — `BossSlayer.sol:180-185` — `damageDealt[msg.sender]` accumulates the full rolled damage even when actual HP loss is lower (boss dies mid-hit), giving the finisher a proportionally larger Heavy Split share. Acknowledged in contract NatDoc comment as intentional design; not a bug.
 
-- **[INFO]** `damageDealt` credits overkill in full — `packages/foundry/contracts/BossSlayer.sol:180-185` — `damageDealt[msg.sender]` accumulates the full rolled damage (100 or 1000) even when actual HP loss is lower (boss dies mid-hit), giving the finisher a proportionally boosted Heavy Split share. Acknowledged in contract NatDoc comment as intentional design. Not a bug.
+- **[INFO]** Missing test for zero-`initialOwner` constructor guard — `BossSlayer.t.sol:60-62` — Guard is correct in the contract; test coverage gap only. Acknowledged in test file comment.
 
-- **[INFO]** `PastRaids` fetches events from `fromBlock: 0n` — `packages/nextjs/app/_components/PastRaids.tsx:9` — Scanning from block 0 works for a freshly deployed contract but will slow over time. Acceptable for v1; anchor `fromBlock` to the deploy block in a future iteration.
+- **[LOW]** `LicensePanel` approval missing `approveCooldown` second state — `LicensePanel.tsx:51-68` — Only the `approving` flag (click→hash gap) is present; the `approveCooldown` state (confirm→allowance-cache-refresh gap) is absent. Fast double-clicks after confirmation can send a redundant second approval. Risk is low (approval is idempotent). Acknowledged in code comment.
 
-- **[INFO]** Missing test for zero-`initialOwner` constructor guard — `packages/foundry/test/BossSlayer.t.sol` — `test_constructor_rejectsZeroClawd` is present but there is no corresponding test for `require(initialOwner != address(0), "owner=0")`. The guard in the contract is correct; this is a coverage gap only.
+- **[LOW]** `AttackPanel` `approvalSubmitting` not cleared in a `finally` block — `AttackPanel.tsx:117-132` — The flag is cleared in both the success path and `catch`, but there is no `finally {}`. If an unexpected throw occurs after `await` resolves, the button becomes permanently stuck in this session. Functionally safe for normal flows; minor deviation from the recommended defensive pattern.
+
+- **[LOW]** `approveCooldown` timeout is 1500 ms — `AttackPanel.tsx:127` — Base block time is ~2 s; the cooldown may expire before the allowance cache has refreshed, re-enabling the Approve button while the transaction is still confirming. 4000 ms is the recommended minimum.
+
+- **[LOW]** Phantom wallet not in RainbowKit wallet list — `wagmiConnectors.tsx:20-28` — `phantomWallet` is not imported or added to the wallets array. Phantom users must use WalletConnect as a fallback to connect.
+
+- **[INFO]** `wagmiConnectors.tsx` app name is the SE2 default — `wagmiConnectors.tsx:49` — `appName: "scaffold-eth-2"` appears in WalletConnect session UI and wallet pairing prompts. Should be "BOSS_SLAYER" or equivalent project name.
+
+- **[INFO]** SE2 template README not replaced — `README.md` — The README still contains SE2 boilerplate ("Scaffold-ETH 2", template quickstart, documentation links). It does not describe BOSS_SLAYER.
+
+- **[INFO]** Deployed contract address not shown on page — No component — None of the UI components display the BossSlayer contract address via `<Address/>`. Users cannot verify from the UI which contract they are interacting with.
+
+- **[INFO]** CLAWD amounts displayed without USD equivalent — `BossPanel.tsx:71`, `AttackPanel.tsx:177-184`, `Leaderboard.tsx:54-64` — All token quantities are shown as raw CLAWD values with no USD conversion alongside them.
+
+- **[LOW]** No mobile deep-link implementation — All transaction buttons — No `writeAndOpen`/`openWallet` helper is implemented. Mobile WalletConnect users must manually switch to their wallet app after initiating a transaction; the wallet app will not auto-open.
+
+- **[INFO]** SE2 default Alchemy API key and WalletConnect project ID are hardcoded fallbacks — `scaffold.config.ts:17, 39` — If `NEXT_PUBLIC_ALCHEMY_API_KEY` and `NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID` are not set in the hosting environment, the app falls back to shared SE2 defaults that are rate-limited under real traffic. These env vars must be confirmed set on the hosting platform before going live.
+
+- **[INFO]** `PastRaids` scans from block 0 — `PastRaids.tsx:10` — `fromBlock: 0n` will slow as the chain grows. Acknowledged in code comment; anchoring to the deploy block is a future improvement.
+
+- **[INFO]** `getMetadata` title template retains "Scaffold-ETH 2" — `getMetadata.ts:8` — `titleTemplate = "%s | Scaffold-ETH 2"` would appear in any sub-page `<title>` tags. This is a single-page app with no sub-pages so there is no current user-visible impact.
 
 ## Summary
-
-- Must Fix: 2 items
-- Known Issues: 9 items
+- Must Fix: 1 item
+- Known Issues: 18 items
 - Audit frameworks followed: contract audit (ethskills.com/audit/SKILL.md), QA audit (ethskills.com/qa/SKILL.md)
