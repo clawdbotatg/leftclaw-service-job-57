@@ -2,6 +2,9 @@
 pragma solidity ^0.8.20;
 
 import { ERC1155 } from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+/// @notice Known issue: Inheriting OZ Ownable exposes renounceOwnership(). If the client calls it,
+///         startRaid() and injectBounty() become permanently inaccessible. No user funds are at risk
+///         (an active raid still settles on kill); this is an operational risk accepted by the owner.
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -49,8 +52,18 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
     mapping(address => bool) private hasAttacked; // resets each raid
     address[] public attackers;
 
+    // --- Commit-Reveal ---
+    /// @dev Tracks a pending (committed but not yet revealed) attack for each player.
+    struct PendingAttack {
+        uint256 commitBlock;    // block in which commitAttack() was mined
+        uint256 raidIdAtCommit; // raidId at commit time; used to detect stale reveals
+    }
+    /// @notice Returns the pending uncommitted attack for a player (commitBlock == 0 means none).
+    mapping(address => PendingAttack) public pendingAttacks;
+
     // --- Events ---
     event LicenseMinted(address indexed wallet, uint256 pot);
+    event AttackCommitted(uint256 indexed raidId, address indexed attacker, uint256 commitBlock);
     event Attack(
         uint256 indexed raidId, address indexed attacker, uint256 damage, uint256 bossHP, bool isCrit
     );
@@ -70,6 +83,9 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
     error NoLicense();
     error InvalidHP();
     error NoAttackersToStart();
+    error AttackAlreadyPending();
+    error NoAttackPending();
+    error MustWaitOneBlock();
 
     constructor(address clawdToken, address initialOwner)
         ERC1155("")
@@ -81,6 +97,9 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
     }
 
     // --- Metadata ---
+    /// @notice Known issue: Slayer Licenses (ERC-1155 id 0) have no metadata URI; wallets and
+    ///         marketplaces will show a blank NFT. Licenses are utility-only; the UI renders
+    ///         their balance directly from contract state. A URI setter can be added in a future cycle.
     function uri(uint256) public pure override returns (string memory) {
         // Single-token collection. Static JSON URI could be added later by owner.
         return "";
@@ -105,25 +124,62 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
         emit LicenseMinted(msg.sender, pot);
     }
 
-    // --- Public: Attack ---
-    /// @notice Attack the Boss. Costs ATTACK_COST CLAWD (half burned, half to pot). 5% crit chance = 10x damage.
-    function attack() external nonReentrant {
+    // --- Public: Attack (commit-reveal) ---
+
+    /// @notice Phase 1 — lock in your attack. CLAWD is taken immediately.
+    /// @dev    The crit roll is resolved in revealAttack() using blockhash(commitBlock), which the
+    ///         caller cannot know when broadcasting this transaction. This prevents selective-crit
+    ///         front-running that would otherwise drain the Heavy Hitter pot disproportionately.
+    ///         CLAWD is burned / potted here regardless of reveal outcome.
+    function commitAttack() external nonReentrant {
         if (!raidActive) revert RaidNotActive();
         if (balanceOf(msg.sender, LICENSE_ID) == 0) revert NoLicense();
+        if (pendingAttacks[msg.sender].commitBlock != 0) revert AttackAlreadyPending();
 
         clawd.safeTransferFrom(msg.sender, address(this), ATTACK_COST);
         clawd.safeTransfer(address(0xdead), ATTACK_BURN);
         pot += ATTACK_POT;
 
+        pendingAttacks[msg.sender] = PendingAttack({ commitBlock: block.number, raidIdAtCommit: raidId });
+        emit AttackCommitted(raidId, msg.sender, block.number);
+    }
+
+    /// @notice Phase 2 — resolve the crit roll using blockhash(commitBlock) and apply damage.
+    /// @dev    Must be called at least 1 block after commitAttack() and within 255 blocks.
+    ///         If the raid ended or restarted between commit and reveal the pending state is
+    ///         cleared without crediting damage (CLAWD was already accounted for in the prior raid).
+    ///         blockhash() returns 0 for blocks older than 256; calling after 255 blocks silently
+    ///         discards the attack so the player is never permanently stuck.
+    function revealAttack() external nonReentrant {
+        PendingAttack memory pending = pendingAttacks[msg.sender];
+        if (pending.commitBlock == 0) revert NoAttackPending();
+        if (block.number == pending.commitBlock) revert MustWaitOneBlock();
+
+        // Clear unconditionally — player must never be permanently stuck with a pending attack.
+        delete pendingAttacks[msg.sender];
+
+        // Expired: blockhash no longer available (>255 blocks elapsed). Silently drop.
+        if (block.number > pending.commitBlock + 255) {
+            return;
+        }
+
+        // Stale: raid ended or restarted after the commit. Silently drop.
+        // CLAWD was already burned/potted and distributed with the previous raid's settlement.
+        if (!raidActive || pending.raidIdAtCommit != raidId) {
+            return;
+        }
+
+        bytes32 bhash = blockhash(pending.commitBlock);
+        // bhash is guaranteed non-zero here because block.number <= pending.commitBlock + 255.
+
         uint256 nonce = attackNonce;
-        uint256 roll = uint256(
-            keccak256(abi.encodePacked(blockhash(block.number - 1), msg.sender, nonce))
-        ) % 100;
+        uint256 roll = uint256(keccak256(abi.encodePacked(bhash, msg.sender, nonce))) % 100;
         bool isCrit = roll < CRIT_CHANCE;
         uint256 damage = isCrit ? CRIT_DAMAGE : BASE_DAMAGE;
 
-        // Floor only the HP subtraction at 0. Damage credited to the attacker is the full rolled damage
-        // (overkill still counts toward Heavy Hitter share — rewards the finisher with big crits).
+        /// @notice Known issue: damageDealt credits full rolled damage including overkill; hpLoss
+        ///         floors at 0. Intentional design: the finisher earns a bonus on the Heavy split
+        ///         proportional to their final blow. Asymmetric but not a bug.
         uint256 hpLoss = damage > bossHP ? bossHP : damage;
         bossHP -= hpLoss;
         damageDealt[msg.sender] += damage;
@@ -146,6 +202,10 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
 
     // --- Owner ---
     /// @notice Start a new raid. Resets per-raid state and bumps raidId.
+    /// @notice Known issue: Settlement gas scales with unique-attacker count. startRaid() does a
+    ///         full-length clear of the prior raid's state; _settle() runs three full-length loops
+    ///         over attackers. The finisher pays settlement gas. Acceptable on Base at current game
+    ///         scale (well within 30M block gas for thousands of unique attackers).
     function startRaid(uint256 newHP) external onlyOwner {
         if (raidActive) revert RaidAlreadyActive();
         if (newHP == 0) revert InvalidHP();
@@ -230,6 +290,10 @@ contract BossSlayer is ERC1155, Ownable, ReentrancyGuard {
         emit PayoutSniper(rid, target, sniper);
     }
 
+    /// @notice Known issue: Lucky Drop RNG uses the same blockhash-based seed weakness as the
+    ///         former crit roll. The finisher can compute the lucky-winner set before landing the
+    ///         killing blow and choose whether to proceed. Impact is capped at 5% of pot; acceptable
+    ///         for v1. Bundle into the same VRF/commit-reveal extension if tightening in a future cycle.
     function _payLucky(uint256 rid, uint256 settlePot, uint256 attackerCount) internal {
         uint256 lucky = (settlePot * LUCKY_PCT) / 100;
         if (lucky == 0 || attackerCount == 0) return;

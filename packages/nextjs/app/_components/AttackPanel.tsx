@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { formatEther } from "viem";
-import { useAccount } from "wagmi";
+import { useAccount, useBlockNumber } from "wagmi";
 import { useDeployedContractInfo, useScaffoldReadContract, useScaffoldWriteContract } from "~~/hooks/scaffold-eth";
 
 const ATTACK_COST = 200n * 10n ** 18n;
@@ -50,6 +50,23 @@ export function AttackPanel() {
     watch: true,
   });
 
+  // Pending commit-reveal state for the connected wallet.
+  const { data: pendingAttack } = useScaffoldReadContract({
+    contractName: "BossSlayer",
+    functionName: "pendingAttacks",
+    args: [address],
+    watch: true,
+  });
+  const pendingCommitBlock = pendingAttack?.[0] ?? 0n;
+  const hasPending = pendingCommitBlock > 0n;
+
+  // Current block number — used to decide if the reveal window is open.
+  const { data: blockNumber } = useBlockNumber({ watch: true });
+  const currentBlock = blockNumber ?? 0n;
+
+  const canReveal = hasPending && currentBlock > pendingCommitBlock;
+  const isExpired = hasPending && currentBlock > pendingCommitBlock + 255n;
+
   const { writeContractAsync, isMining } = useScaffoldWriteContract({ contractName: "BossSlayer" });
   const { writeContractAsync: approveClawd } = useScaffoldWriteContract({ contractName: "Clawd" });
 
@@ -67,9 +84,17 @@ export function AttackPanel() {
     return (((pot * 50n) / 100n) * myDamage) / totalDamage;
   }, [pot, totalDamage, myDamage]);
 
-  const handleAttack = async () => {
+  const handleCommit = async () => {
     try {
-      await writeContractAsync({ functionName: "attack" });
+      await writeContractAsync({ functionName: "commitAttack" });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleReveal = async () => {
+    try {
+      await writeContractAsync({ functionName: "revealAttack" });
     } catch (e) {
       console.error(e);
     }
@@ -87,8 +112,10 @@ export function AttackPanel() {
     }
   };
 
-  const disabled = !address || !raidActive || !hasLicense || isMining;
-  const reason = !address
+  const commitDisabled = !address || !raidActive || !hasLicense || isMining || hasPending;
+  const revealDisabled = !address || isMining || !canReveal || isExpired;
+
+  const commitReason = !address
     ? "Connect wallet"
     : !raidActive
       ? "Raid not active"
@@ -96,7 +123,9 @@ export function AttackPanel() {
         ? "Need Slayer License"
         : !hasAllowance
           ? "Approve CLAWD first"
-          : "";
+          : hasPending
+            ? "Reveal your pending attack first"
+            : "";
 
   return (
     <div className="card bg-base-100 border border-base-300 shadow-md">
@@ -130,21 +159,48 @@ export function AttackPanel() {
         </div>
 
         <div className="text-[11px] opacity-60 pt-1">
-          Costs <span className="font-mono">200 CLAWD</span> (100 burn + 100 pot). 5% crit = 10× damage.
+          Costs <span className="font-mono">200 CLAWD</span> (100 burn + 100 pot). 5% crit = 10× damage. Attack is a
+          two-step commit/reveal — commit locks in your CLAWD, reveal resolves the crit.
         </div>
 
-        {hasAllowance || !address ? (
+        {hasPending && !isExpired && (
+          <div className="alert alert-info text-xs py-2">
+            <span>
+              Attack committed at block {pendingCommitBlock.toString()}.{" "}
+              {canReveal ? "Ready to reveal!" : "Waiting for next block…"}
+            </span>
+          </div>
+        )}
+
+        {isExpired && (
+          <div className="alert alert-warning text-xs py-2">
+            <span>Pending attack expired ({">"} 255 blocks). Reveal to clear your state, then commit again.</span>
+          </div>
+        )}
+
+        {!hasPending && (hasAllowance || !address) ? (
           <button
-            className={`btn ${raidActive ? "btn-error" : "btn-disabled"} btn-lg`}
-            disabled={disabled}
-            onClick={handleAttack}
+            className={`btn ${raidActive && !commitDisabled ? "btn-error" : "btn-disabled"} btn-lg`}
+            disabled={commitDisabled}
+            onClick={handleCommit}
           >
             {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">🗡️</span>}
-            {reason || "ATTACK"}
+            {commitReason || "COMMIT ATTACK"}
           </button>
-        ) : (
+        ) : !hasPending ? (
           <button className="btn btn-primary btn-sm" onClick={handleApprove}>
             Approve CLAWD to Attack
+          </button>
+        ) : null}
+
+        {hasPending && (
+          <button
+            className={`btn ${canReveal && !revealDisabled ? "btn-success" : "btn-disabled"} btn-lg`}
+            disabled={revealDisabled}
+            onClick={handleReveal}
+          >
+            {isMining ? <span className="loading loading-spinner"></span> : <span className="text-xl">✨</span>}
+            {isExpired ? "CLEAR EXPIRED ATTACK" : canReveal ? "REVEAL ATTACK" : "Waiting for next block…"}
           </button>
         )}
       </div>

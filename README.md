@@ -81,3 +81,28 @@ To know more about its features, check out our [website](https://scaffoldeth.io)
 We welcome contributions to Scaffold-ETH 2!
 
 Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
+## Known Issues
+
+The following issues were identified in the security audit and are accepted for v1:
+
+- **[LOW] Empty NFT metadata URI** — `BossSlayer.sol` — `uri(uint256)` returns an empty string. Slayer Licenses (ERC-1155 id 0) have no on-chain or off-chain metadata, so wallets and marketplaces display a blank NFT. The UI reads balances directly from contract state, so this does not affect gameplay. A URI setter can be added in a future cycle.
+
+- **[LOW] Ownable: renounceOwnership risk** — `BossSlayer.sol` — OZ `Ownable` exposes `renounceOwnership()`. If the owner calls it, `startRaid()` and `injectBounty()` become permanently inaccessible. No user funds are at risk (an active raid still settles on the kill blow); this is an operational risk accepted by the contract owner.
+
+- **[LOW] Settlement gas scales with unique-attacker count** — `BossSlayer.sol` — `_settle()` runs three full-length loops over the `attackers` array; `startRaid()` clears the prior raid's state in a full-length loop. The finisher pays settlement gas. On Base (30M block gas limit) this is safe for thousands of unique attackers at current game scale. May become expensive for extremely high-participation raids.
+
+- **[LOW] Lucky Drop RNG uses predictable blockhash seed** — `BossSlayer.sol` `_payLucky()` — The lucky-winner draw seed is `keccak256(blockhash(block.number - 1), raidId)`. The finisher can compute the lucky-winner set before landing the kill blow. Impact is capped at 5% of pot. Acceptable for v1; bundle into a VRF/commit-reveal extension in a future cycle.
+
+- **[LOW] damageDealt credits overkill damage** — `BossSlayer.sol` — Full rolled damage (including overkill past 0 HP) is credited to `damageDealt`. HP subtraction is floored at 0. This is an intentional finisher-bonus design: the killing blow attacker earns a proportionally larger Heavy Hitter share. Asymmetric but not a bug.
+
+- **[INFO] SE-2 branding in tab-title template** — `getMetadata.ts` — `titleTemplate` still reads `"%s | Scaffold-ETH 2"`. No sub-pages exist today so this is not visible, but any future sub-page would leak SE-2 branding. Fix by updating the template string.
+
+- **[INFO] Default OG image** — `getMetadata.ts` — `og:image` resolves to the SE-2 default `/thumbnail.jpg`. Replace `public/thumbnail.jpg` with a BOSS_SLAYER–branded image for proper social unfurls.
+
+- **[INFO] No USD values next to CLAWD amounts** — Frontend components show raw CLAWD amounts without a USD equivalent. CLAWD has no canonical on-chain USD oracle wired in v1. Acceptable; add a price feed in a future cycle if desired.
+
+- **[INFO] BossSlayer contract address not surfaced in UI** — The deployed contract address is not displayed via `<Address/>` on the main page. Users can find it via the block explorer after deployment.
+
+- **[INFO] Minimal CLAWD ABI in externalContracts.ts** — Only `balanceOf`, `allowance`, `approve`, `transfer`, and a few other standard ERC-20 functions are included. Sufficient for the current UI; add more selectors if future features need them.
+
+- **[INFO] No Phantom wallet connector** — Stock RainbowKit connectors are used. Phantom holders on Base may need to use the generic injected connector. Add an explicit Phantom connector in a future cycle if desired.

@@ -35,6 +35,15 @@ contract BossSlayerTest is Test {
         clawd.approve(address(game), type(uint256).max);
     }
 
+    /// @dev Helper: commit + advance 1 block + reveal for `who`.
+    function _doAttack(address who) internal {
+        vm.prank(who);
+        game.commitAttack();
+        vm.roll(block.number + 1);
+        vm.prank(who);
+        game.revealAttack();
+    }
+
     // --- Construction ---
     function test_constructor_setsClawdAndOwner() public view {
         assertEq(address(game.clawd()), address(clawd));
@@ -98,25 +107,123 @@ contract BossSlayerTest is Test {
         assertTrue(game.raidActive());
     }
 
-    // --- Attack ---
-    function test_attack_requiresLicense() public {
+    // --- Commit-reveal: error paths ---
+    function test_commitAttack_requiresLicense() public {
         vm.prank(owner);
         game.startRaid(100_000);
 
         vm.prank(alice);
         vm.expectRevert(BossSlayer.NoLicense.selector);
-        game.attack();
+        game.commitAttack();
     }
 
-    function test_attack_requiresActiveRaid() public {
+    function test_commitAttack_requiresActiveRaid() public {
         vm.prank(alice);
         game.mintLicense();
 
         vm.prank(alice);
         vm.expectRevert(BossSlayer.RaidNotActive.selector);
-        game.attack();
+        game.commitAttack();
     }
 
+    function test_commitAttack_rejectsDoublePending() public {
+        vm.prank(owner);
+        game.startRaid(100_000);
+        vm.prank(alice);
+        game.mintLicense();
+
+        vm.prank(alice);
+        game.commitAttack();
+        // Second commit without reveal should revert.
+        vm.prank(alice);
+        vm.expectRevert(BossSlayer.AttackAlreadyPending.selector);
+        game.commitAttack();
+    }
+
+    function test_revealAttack_requiresPending() public {
+        vm.prank(owner);
+        game.startRaid(100_000);
+        vm.prank(alice);
+        game.mintLicense();
+
+        vm.prank(alice);
+        vm.expectRevert(BossSlayer.NoAttackPending.selector);
+        game.revealAttack();
+    }
+
+    function test_revealAttack_requiresNextBlock() public {
+        vm.prank(owner);
+        game.startRaid(100_000);
+        vm.prank(alice);
+        game.mintLicense();
+
+        vm.prank(alice);
+        game.commitAttack();
+        // Reveal in the same block should revert.
+        vm.prank(alice);
+        vm.expectRevert(BossSlayer.MustWaitOneBlock.selector);
+        game.revealAttack();
+    }
+
+    function test_revealAttack_expiredDropsSilently() public {
+        vm.prank(owner);
+        game.startRaid(100_000);
+        vm.prank(alice);
+        game.mintLicense();
+
+        vm.prank(alice);
+        game.commitAttack();
+        // Advance past the 255-block window.
+        vm.roll(block.number + 256);
+        // Reveal silently drops (no revert) — player is unstuck.
+        vm.prank(alice);
+        game.revealAttack();
+        // No damage credited.
+        (uint256 dmg,) = game.getDamage(alice);
+        assertEq(dmg, 0);
+        // Pending state cleared — can commit again.
+        (uint256 cb,) = game.pendingAttacks(alice);
+        assertEq(cb, 0);
+    }
+
+    function test_revealAttack_staleRaidDropsSilently() public {
+        vm.prank(owner);
+        game.startRaid(200); // small HP
+        vm.prank(alice);
+        game.mintLicense();
+        vm.prank(owner);
+        game.injectBounty(10_000 ether);
+
+        // Alice commits but doesn't reveal.
+        vm.prank(alice);
+        game.commitAttack();
+
+        // Kill the boss with bob so the raid ends.
+        vm.prank(bob);
+        game.mintLicense();
+        uint256 safety;
+        while (game.raidActive() && safety < 200) {
+            vm.prank(bob);
+            game.commitAttack();
+            vm.roll(block.number + 1);
+            vm.prank(bob);
+            game.revealAttack();
+            safety++;
+        }
+        assertFalse(game.raidActive(), "raid should have ended");
+
+        // Alice reveals after the raid ended — should silently drop.
+        vm.prank(alice);
+        game.revealAttack();
+        // No damage in this raid (raid 1 is gone; no current raid).
+        (uint256 dmg,) = game.getDamage(alice);
+        assertEq(dmg, 0);
+        // Pending state cleared.
+        (uint256 cb,) = game.pendingAttacks(alice);
+        assertEq(cb, 0);
+    }
+
+    // --- Attack: happy path ---
     function test_attack_burnsAndPotsAndDamages() public {
         vm.prank(owner);
         game.startRaid(100_000);
@@ -127,11 +234,16 @@ contract BossSlayerTest is Test {
         uint256 burnBefore = clawd.balanceOf(BURN_ADDRESS);
         uint256 potBefore = game.pot();
 
+        // Burn/pot happen at commit time.
         vm.prank(alice);
-        game.attack();
-
+        game.commitAttack();
         assertEq(clawd.balanceOf(BURN_ADDRESS) - burnBefore, game.ATTACK_BURN());
         assertEq(game.pot() - potBefore, game.ATTACK_POT());
+
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        game.revealAttack();
+
         (uint256 dmg, uint256 count) = game.getDamage(alice);
         assertGt(dmg, 0);
         assertEq(count, 1);
@@ -148,9 +260,11 @@ contract BossSlayerTest is Test {
 
         bool sawCrit;
         for (uint256 i = 0; i < 200; i++) {
+            vm.prank(alice);
+            game.commitAttack();
             vm.roll(block.number + 1);
             vm.prank(alice);
-            game.attack();
+            game.revealAttack();
             (uint256 dmg,) = game.getDamage(alice);
             if (dmg >= game.CRIT_DAMAGE()) {
                 sawCrit = true;
@@ -181,13 +295,17 @@ contract BossSlayerTest is Test {
         // Burn through the boss. Keep attacking until raid closes.
         uint256 safety;
         while (game.raidActive() && safety < 500) {
+            vm.prank(alice);
+            game.commitAttack();
             vm.roll(block.number + 1);
             vm.prank(alice);
-            game.attack();
+            game.revealAttack();
             if (!game.raidActive()) break;
+            vm.prank(bob);
+            game.commitAttack();
             vm.roll(block.number + 1);
             vm.prank(bob);
-            game.attack();
+            game.revealAttack();
             safety++;
         }
         assertFalse(game.raidActive(), "raid should have ended");
@@ -219,16 +337,12 @@ contract BossSlayerTest is Test {
         // Knock boss down to near-zero with alice, then bob lands the final blow.
         uint256 safety;
         while (game.bossHP() > 100 && safety < 500) {
-            vm.roll(block.number + 1);
-            vm.prank(alice);
-            game.attack();
+            _doAttack(alice);
             safety++;
         }
         // Bob lands the killing hit
         uint256 bobBefore = clawd.balanceOf(bob);
-        vm.roll(block.number + 1);
-        vm.prank(bob);
-        game.attack();
+        _doAttack(bob);
         uint256 bobGain = clawd.balanceOf(bob) - bobBefore;
 
         assertEq(game.finalBlowWallet(), bob);
@@ -248,9 +362,7 @@ contract BossSlayerTest is Test {
 
         uint256 safety;
         while (game.raidActive() && safety < 100) {
-            vm.roll(block.number + 1);
-            vm.prank(alice);
-            game.attack();
+            _doAttack(alice);
             safety++;
         }
 
@@ -310,9 +422,7 @@ contract BossSlayerTest is Test {
             vm.prank(p);
             game.mintLicense();
             for (uint256 j = 0; j < attacks[i]; j++) {
-                vm.roll(block.number + 1);
-                vm.prank(p);
-                game.attack();
+                _doAttack(p);
             }
         }
 
